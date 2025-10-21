@@ -1,0 +1,66 @@
+services:
+  redpanda:
+    image: docker.redpanda.com/redpandadata/redpanda:v24.1.9
+    entrypoint: []                      # disable rpk wrapper
+    command:
+      - redpanda
+      - start
+      - --overprovisioned
+      - --smp
+      - "1"
+      - --memory
+      - 1G
+      - --reserve-memory
+      - 0M
+    ports: ["9092:9092","9644:9644"]
+
+  redpanda-console:
+    image: docker.redpanda.com/redpandadata/console:latest
+    depends_on: [redpanda]
+    environment:
+      KAFKA_BROKERS: redpanda:9092
+    ports: ["8080:8080"]
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:24
+    ports: ["8123:8123","9000:9000"]
+    ulimits:
+      nofile: { soft: 262144, hard: 262144 }
+
+  producer:
+    build: ./services/producer
+    environment:
+      BROKER: redpanda:9092
+      TOPIC: transactions
+      RATE_PER_SEC: "200"
+    depends_on: [redpanda]
+    ports: ["8000:8000"]
+
+  processor:
+    build: ./services/processor
+    environment:
+      BROKER: redpanda:9092
+      TOPIC: transactions
+      CLICKHOUSE_URL: http://clickhouse:8123
+    depends_on: [redpanda, clickhouse]
+    # If your app is Faust, uncomment the next line and delete the default CMD
+    # command: ["faust","-A","main","worker","-l","info"]
+
+  prometheus:
+    image: prom/prometheus:latest
+    volumes:
+      - ./infra/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports: ["9090:9090"]
+
+  grafana:
+    image: grafana/grafana:latest
+    depends_on: [prometheus, clickhouse]
+    volumes:
+      - ./infra/grafana/provisioning:/etc/grafana/provisioning
+      - ./infra/grafana/dashboards:/var/lib/grafana/dashboards
+    ports: ["3000:3000"]
+
+  toxiproxy:
+    image: shopify/toxiproxy
+    ports: ["8474:8474"]
+    command: -host=0.0.0.0

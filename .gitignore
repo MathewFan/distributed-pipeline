@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+.env
+*.env
+*.egg-info/
+.pytest_cache/
+
+# Editors/OS
+.vscode/
+.idea/
+.DS_Store
+
+# Logs / temp
+*.log
+*.tmp
+
+# Project-specific
+processor-data/
+data/
