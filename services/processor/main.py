@@ -1,46 +1,56 @@
+"""Bounded batches; synchronous commits occur only after sink acknowledgement."""
+import logging
 import os
-import faust
+import signal
+import time
+from urllib.parse import urlparse
 import clickhouse_connect
-from prometheus_client import Counter, start_http_server
+from confluent_kafka import Consumer, TopicPartition
+from prometheus_client import Counter, Histogram, start_http_server
+from pipeline.core import BatchProcessor, Record
+from pipeline.sink import ClickHouseSink
 
-BROKER = os.getenv("BROKER","redpanda:9092")
-TOPIC  = os.getenv("TOPIC","transactions")
+outcomes = Counter("pipeline_records_total", "Committed outcomes and retries", ["outcome"])
+latency = Histogram("pipeline_batch_seconds", "Sink and synchronous commit duration")
 
-processed = Counter("events_processed_total","events processed")
-start_http_server(9101)
 
-app = faust.App("processor", broker=f"kafka://{BROKER}", value_serializer="raw")
+def main():
+    logging.basicConfig(level=logging.INFO)
+    url = urlparse(os.getenv("CLICKHOUSE_URL", "http://clickhouse:8123"))
+    client = clickhouse_connect.get_client(host=url.hostname, port=url.port or 8123,
+        username=os.getenv("CLICKHOUSE_USER", "pipeline"), password=os.environ["CLICKHOUSE_PASSWORD"],
+        connect_timeout=5, send_receive_timeout=10)
+    sink = ClickHouseSink(client)
+    consumer = Consumer({"bootstrap.servers": os.getenv("BROKER", "redpanda:9092"),
+        "group.id": os.getenv("GROUP_ID", "transactions-v2"), "auto.offset.reset": "earliest",
+        "enable.auto.commit": False, "enable.auto.offset.store": False,
+        "max.poll.interval.ms": 300000, "session.timeout.ms": 10000})
+    def commit(offsets):
+        results = consumer.commit(offsets=[TopicPartition(t, p, o) for (t, p), o in offsets.items()], asynchronous=False)
+        if any(partition.error for partition in (results or [])):
+            raise RuntimeError("offset commit failed")
+    processor = BatchProcessor(sink, commit, observe=lambda kind, count: outcomes.labels(kind).inc(count))
+    stopping = False
+    def stop(*_):
+        nonlocal stopping
+        stopping = True
+    signal.signal(signal.SIGTERM, stop)
+    signal.signal(signal.SIGINT, stop)
+    start_http_server(9101)
+    consumer.subscribe([os.getenv("TOPIC", "transactions")])
+    try:
+        while not stopping:
+            messages = consumer.consume(num_messages=100, timeout=1)
+            records = []
+            for msg in messages:
+                if msg.error():
+                    raise RuntimeError(str(msg.error()))
+                records.append(Record(msg.topic(), msg.partition(), msg.offset(), msg.value() or b""))
+            with latency.time():
+                processor.process(records)
+    finally:
+        consumer.close()
+        client.close()
 
-class Tx(faust.Record, serializer="json"):
-    tx_id: str
-    user_id: int
-    amount: float
-    merchant: str
-    ts: str
 
-topic = app.topic(TOPIC, value_type=Tx)
-
-client = clickhouse_connect.get_client(host="clickhouse", port=8123, username="default", password="")
-client.command("""
-CREATE TABLE IF NOT EXISTS transactions (
-  ts DateTime64(3,'UTC'),
-  tx_id String,
-  user_id UInt32,
-  amount Float64,
-  merchant LowCardinality(String)
-) ENGINE = MergeTree
-ORDER BY (ts, user_id)
-""")
-
-@app.agent(topic)
-async def consume(stream):
-    async for tx in stream:
-        client.insert(
-            "transactions",
-            [[tx.ts, tx.tx_id, tx.user_id, tx.amount, tx.merchant]],
-            column_names=["ts","tx_id","user_id","amount","merchant"]
-        )
-        processed.inc()
-
-if __name__ == "__main__":
-    app.main()
+if __name__ == "__main__": main()

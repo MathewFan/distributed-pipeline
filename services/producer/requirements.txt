@@ -1,4 +1,4 @@
-fastapi==0.115.*
-uvicorn[standard]==0.30.*
-confluent-kafka==2.5.*
-prometheus-client==0.20.*
+fastapi==0.115.6
+uvicorn==0.34.0
+confluent-kafka==2.6.1
+prometheus-client==0.21.1

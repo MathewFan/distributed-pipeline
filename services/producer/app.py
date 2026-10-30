@@ -1,52 +1,73 @@
-import os, time, random, json, threading
+"""Synthetic event generator with delivery acknowledgements and bounded queues."""
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
-from fastapi import FastAPI
-from prometheus_client import Counter, Histogram, generate_latest
-from fastapi.responses import PlainTextResponse
+import json
+import os
+import random
+import threading
+import uuid
 from confluent_kafka import Producer
+from fastapi import FastAPI, Response
+from prometheus_client import Counter, Gauge, generate_latest, CONTENT_TYPE_LATEST
 
-BROKER = os.getenv("BROKER","redpanda:9092")
-TOPIC  = os.getenv("TOPIC","transactions")
-RATE   = float(os.getenv("RATE_PER_SEC","200"))
+acked = Counter("producer_delivered_total", "Broker-confirmed successful deliveries")
+failed = Counter("producer_failed_total", "Final delivery failures")
+backpressure = Counter("producer_backpressure_total", "Queue-full events")
+queued = Gauge("producer_queue_messages", "Messages awaiting broker acknowledgement")
 
-producer = Producer({"bootstrap.servers": BROKER})
-app = FastAPI()
-
-events_out = Counter("events_out_total","events produced")
-latency_hist= Histogram("produce_latency_seconds","produce latency")
 
 def make_event():
-    amt = round(random.uniform(1, 1000), 2)
-    return {
-        "tx_id": f"tx_{random.randrange(1_000_000)}",
-        "user_id": random.randint(1, 50_000),
-        "amount": amt,
-        "merchant": random.choice(["AMZ","APL","UBER","STBX","NFLX"]),
-        "ts": datetime.now(timezone.utc).isoformat()
-    }
+    return dict(schema_version=1, tx_id=str(uuid.uuid4()), user_id=random.randint(1, 10000),
+                amount=f"{random.randint(0, 999999) / 100:.2f}", merchant=random.choice(["shop", "travel", "food"]),
+                ts=datetime.now(timezone.utc).isoformat())
 
-def loop():
-    if RATE <= 0:
-        return
-    per = 1.0 / RATE
-    while True:
-        start = time.perf_counter()
-        payload = json.dumps(make_event()).encode()
-        producer.produce(TOPIC, payload)
-        producer.poll(0)
-        events_out.inc()
-        elapsed = time.perf_counter() - start
-        latency_hist.observe(elapsed)
-        sleep_for = per - elapsed
-        if sleep_for > 0:
-            time.sleep(sleep_for)
 
-threading.Thread(target=loop, daemon=True).start()
+@asynccontextmanager
+async def lifespan(app):
+    rate = float(os.getenv("RATE_PER_SEC", "200"))
+    if not 0 < rate <= 10000:
+        raise ValueError("RATE_PER_SEC must be in (0,10000]")
+    producer = Producer({"bootstrap.servers": os.getenv("BROKER", "redpanda:9092"),
+        "enable.idempotence": True, "acks": "all", "delivery.timeout.ms": 10000,
+        "queue.buffering.max.messages": 10000})
+    stopping = threading.Event()
+    def delivered(error, _message):
+        (failed if error else acked).inc()
+    def run():
+        while not stopping.is_set():
+            payload = json.dumps(make_event()).encode()
+            while not stopping.is_set():
+                try:
+                    producer.produce(os.getenv("TOPIC", "transactions"), value=payload, on_delivery=delivered)
+                    break
+                except BufferError:
+                    backpressure.inc()
+                    producer.poll(0.1)
+            producer.poll(0)
+            queued.set(len(producer))
+            stopping.wait(1 / rate)
+        producer.flush(12)
+        queued.set(len(producer))
+    worker = threading.Thread(target=run, name="event-producer")
+    worker.start()
+    app.state.worker = worker
+    try:
+        yield
+    finally:
+        stopping.set()
+        worker.join(timeout=15)
+        if worker.is_alive():
+            raise RuntimeError("producer failed to shut down")
 
-@app.get("/metrics", response_class=PlainTextResponse)
+
+app = FastAPI(lifespan=lifespan)
+
+
+@app.get("/health")
+def health():
+    return Response(status_code=200 if app.state.worker.is_alive() else 503)
+
+
+@app.get("/metrics")
 def metrics():
-    return PlainTextResponse(generate_latest().decode())
-
-@app.get("/")
-def root():
-    return {"status":"ok","broker":BROKER,"topic":TOPIC,"rate_per_sec":RATE}
+    return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
