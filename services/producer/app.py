@@ -17,8 +17,9 @@ queued = Gauge("producer_queue_messages", "Messages awaiting broker acknowledgem
 
 
 def make_event():
+    cents = random.randint(0, 999999)
     return dict(schema_version=1, tx_id=str(uuid.uuid4()), user_id=random.randint(1, 10000),
-                amount=f"{random.randint(0, 999999) / 100:.2f}", merchant=random.choice(["shop", "travel", "food"]),
+                amount=f"{cents // 100}.{cents % 100:02d}", merchant=random.choice(["shop", "travel", "food"]),
                 ts=datetime.now(timezone.utc).isoformat())
 
 

@@ -1,0 +1,28 @@
+name: Recovery checks
+on: [push, pull_request]
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - run: python -m unittest discover -s tests -v
+  integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker compose up -d --wait redpanda clickhouse
+      - run: docker compose run --rm processor python -m tests.integration
+      - name: Service smoke check
+        run: |
+          docker compose up -d producer processor
+          sleep 15
+          curl --fail http://127.0.0.1:8000/health
+          curl --fail http://127.0.0.1:9101/metrics
+          docker compose exec -T clickhouse clickhouse-client --user pipeline --password local-demo-only --query "SELECT throwIf(count() = 0, 'no live records processed') FROM transactions WHERE topic = 'transactions'"
+      - if: always()
+        run: docker compose logs --tail 100
+      - if: always()
+        run: docker compose down -v
