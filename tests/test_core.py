@@ -46,9 +46,16 @@ class RecoveryTests(unittest.TestCase):
     def test_rejects_float_precision_bad_dates_and_nonfinite_amounts(self):
         for update in [dict(amount=1.1), dict(amount="NaN"), dict(amount="0.001"),
                        dict(amount="-1.00"), dict(ts="2026-01-01"), dict(user_id=True),
-                       dict(schema_version=2), dict(tx_id="x"), dict(merchant=""), dict(ts="1500-01-01T00:00:00Z")]:
+                       dict(schema_version=2), dict(schema_version=True), dict(schema_version=1.0), dict(tx_id="x"), dict(merchant=""), dict(ts="1500-01-01T00:00:00Z")]:
             with self.subTest(update=update), self.assertRaises(InvalidEvent): validate(event(**update))
         self.assertEqual(str(validate(event())[2]), "123456789.01")
+
+    def test_quarantine_reason_does_not_echo_private_payload(self):
+        sink = Sink()
+        BatchProcessor(sink, lambda _: None).process([Record("t", 0, 0, event(ts="private-customer-value"))])
+        reason = next(iter(sink.bad.values()))[-1]
+        self.assertNotIn("private-customer-value", reason)
+        self.assertEqual(reason, "invalid event structure or value")
 
     def test_empty_batch_does_not_commit(self):
         BatchProcessor(Sink(), lambda _: self.fail("unexpected commit")).process([])

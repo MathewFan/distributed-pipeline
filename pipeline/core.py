@@ -14,7 +14,7 @@ class InvalidEvent(ValueError):
 def validate(raw):
     try:
         event = json.loads(raw)
-        if not isinstance(event, dict) or event.get("schema_version") != 1:
+        if not isinstance(event, dict) or type(event.get("schema_version")) is not int or event.get("schema_version") != 1:
             raise InvalidEvent("schema_version must be 1")
         tx_id = str(uuid.UUID(event["tx_id"]))
         user = event["user_id"]
@@ -38,8 +38,11 @@ def validate(raw):
         if not 1970 <= stamp.year <= 2200:
             raise InvalidEvent("ts out of range")
         return tx_id, user, amount, merchant, stamp
+    except InvalidEvent:
+        raise
     except (ValueError, TypeError, KeyError, InvalidOperation, OverflowError, AttributeError) as error:
-        raise InvalidEvent(str(error)) from error
+        # Parser exception text can echo the raw input (for example ISO dates).
+        raise InvalidEvent("invalid event structure or value") from error
 
 
 @dataclass(frozen=True)
