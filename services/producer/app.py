@@ -8,6 +8,7 @@ import threading
 import uuid
 from confluent_kafka import Producer
 from fastapi import FastAPI, Response
+from pipeline.broker import ensure_topic
 from prometheus_client import Counter, Gauge, generate_latest, CONTENT_TYPE_LATEST
 
 acked = Counter("producer_delivered_total", "Broker-confirmed successful deliveries")
@@ -28,6 +29,7 @@ async def lifespan(app):
     rate = float(os.getenv("RATE_PER_SEC", "200"))
     if not 0 < rate <= 10000:
         raise ValueError("RATE_PER_SEC must be in (0,10000]")
+    ensure_topic(os.getenv("BROKER", "redpanda:9092"), os.getenv("TOPIC", "transactions"))
     producer = Producer({"bootstrap.servers": os.getenv("BROKER", "redpanda:9092"),
         "enable.idempotence": True, "acks": "all", "delivery.timeout.ms": 10000,
         "queue.buffering.max.messages": 10000})

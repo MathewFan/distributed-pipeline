@@ -9,6 +9,7 @@ from confluent_kafka import Consumer, TopicPartition
 from prometheus_client import Counter, Histogram, start_http_server
 from pipeline.core import BatchProcessor, Record
 from pipeline.sink import ClickHouseSink
+from pipeline.broker import ensure_topic
 
 outcomes = Counter("pipeline_records_total", "Committed outcomes and retries", ["outcome"])
 latency = Histogram("pipeline_batch_seconds", "Sink and synchronous commit duration")
@@ -37,7 +38,9 @@ def main():
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
     start_http_server(9101)
-    consumer.subscribe([os.getenv("TOPIC", "transactions")])
+    topic = os.getenv("TOPIC", "transactions")
+    ensure_topic(os.getenv("BROKER", "redpanda:9092"), topic)
+    consumer.subscribe([topic])
     try:
         while not stopping:
             messages = consumer.consume(num_messages=100, timeout=1)

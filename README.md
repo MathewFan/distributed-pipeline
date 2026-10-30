@@ -16,6 +16,8 @@ docker compose run --rm processor python -m tests.integration
 docker compose down -v
 ```
 
+Use a fresh ClickHouse database for this version. The old Float64 `transactions` table is incompatible with the new deduplicated view; back up and migrate existing data separately before upgrading. Startup explicitly provisions a three-partition topic (replication factor 1 for the demo).
+
 The local-only password and loopback ports are development defaults. Broker traffic stays inside the Compose network. Production needs provisioned credentials, TLS, durable volumes, replication and capacity planning; this single-node demo does not model those guarantees. `down -v` discards the demo data.
 
 ## Failure semantics
